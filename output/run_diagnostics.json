@@ -1,0 +1,40 @@
+{
+  "run_at_utc": "2026-04-02T22:53:55.479872+00:00",
+  "elapsed_seconds": 18.71,
+  "markets_selected": 100,
+  "snapshot_rows": 600,
+  "gamma_requests": 3,
+  "gamma_retries": 0,
+  "gamma_failures": 0,
+  "clob_requests": 100,
+  "clob_retries": 0,
+  "clob_failures": 0,
+  "config": {
+    "lookback_days": 30,
+    "target_markets": 100,
+    "horizons_minutes": [
+      10,
+      30,
+      60,
+      120,
+      240,
+      360
+    ],
+    "gamma_page_size": 200,
+    "gamma_max_pages": 50,
+    "clob_history_interval": "max",
+    "clob_history_fidelity": null,
+    "request_timeout_seconds": 25.0,
+    "max_retries": 4,
+    "backoff_base_seconds": 0.4,
+    "output_dir": "output",
+    "plots_dir": "output\\plots"
+  },
+  "outputs": {
+    "tidy_csv": "output\\market_snapshots.csv",
+    "wide_csv": "output\\market_snapshots_wide.csv",
+    "calibration_csv": "output\\calibration_by_horizon.csv",
+    "horizon_metrics_csv": "output\\horizon_metrics.csv",
+    "plots_dir": "output\\plots"
+  }
+}
