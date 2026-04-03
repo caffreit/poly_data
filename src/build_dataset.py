@@ -30,9 +30,12 @@ def build_wide_dataframe(tidy_df: pd.DataFrame) -> pd.DataFrame:
         "question",
         "category",
         "token_id_yes",
+        "outcome_label_positive",
+        "outcome_label_negative",
         "end_time",
         "volume_total_market",
         "outcome_yes",
+        "is_binary_yes_no",
     ]
     base_df = tidy_df[base_cols].drop_duplicates(subset=["market_id"]).set_index("market_id")
 
@@ -47,7 +50,18 @@ def build_wide_dataframe(tidy_df: pd.DataFrame) -> pd.DataFrame:
         .add_suffix("m")
     )
 
-    merged = base_df.join(prices_wide, how="left").reset_index()
+    stale_wide = (
+        tidy_df.pivot_table(
+            index="market_id",
+            columns="horizon_min",
+            values="price_staleness_min",
+            aggfunc="first",
+        )
+        .add_prefix("staleness_")
+        .add_suffix("m")
+    )
+
+    merged = base_df.join(prices_wide, how="left").join(stale_wide, how="left").reset_index()
     return merged
 
 
