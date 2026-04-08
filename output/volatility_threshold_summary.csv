@@ -1,0 +1,3 @@
+volatility_metric,n_total_markets,low_bucket_labels,high_bucket_labels,high_minus_low_mean_abs_isotonic_gap,high_minus_low_mean_abs_error_last_trade,high_minus_low_mean_brier_last_trade,slope_mean_abs_isotonic_gap_by_bucket,slope_mean_abs_error_last_trade_by_bucket,slope_mean_brier_last_trade_by_bucket
+volatility_std,6425,"Decile 1 (lowest), Decile 2, Decile 3","Decile 10 (highest), Decile 8, Decile 9",0.023284140423319756,-0.06715347033714486,-0.030197971259237844,0.0031526082915878852,-0.008992181406255776,-0.003917810622812625
+volatility_range,6425,"Decile 1 (lowest), Decile 2, Decile 3","Decile 10 (highest), Decile 8, Decile 9",0.022531839426494765,-0.03487746636846806,-0.013824245200438595,0.0031057885556445342,-0.004489117421142954,-0.0016567001399569255

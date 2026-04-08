@@ -122,6 +122,96 @@ def _extract_outcome_from_prices(market: Dict[str, Any], idx_pos: int) -> Option
     return None
 
 
+def _normalized_category(category: Any) -> Optional[str]:
+    if category is None:
+        return None
+    text = str(category).strip()
+    if not text:
+        return None
+    return text
+
+
+def _extract_primary_event_id(raw_market: Dict[str, Any]) -> Optional[str]:
+    events = raw_market.get("events")
+    if not isinstance(events, list) or not events:
+        return None
+    first = events[0]
+    if not isinstance(first, dict):
+        return None
+    event_id = first.get("id")
+    if event_id is None:
+        return None
+    text = str(event_id).strip()
+    return text if text else None
+
+
+def _extract_tag_records(value: Any) -> list[dict[str, Any]]:
+    tags = _parse_json_array(value)
+    out: list[dict[str, Any]] = []
+    for tag in tags:
+        if isinstance(tag, dict):
+            out.append(tag)
+    return out
+
+
+def _infer_category_from_tags(tags: list[dict[str, Any]]) -> Optional[str]:
+    if not tags:
+        return None
+
+    canonical_by_exact = {
+        "sports": "Sports",
+        "politics": "Politics",
+        "crypto": "Crypto",
+        "economy": "Economy",
+        "finance": "Economy",
+        "world": "World",
+        "technology": "Technology",
+        "tech": "Technology",
+        "science": "Science",
+        "culture": "Culture",
+    }
+    ignore = {
+        "hide from new",
+        "recurring",
+        "up or down",
+        "5m",
+        "15m",
+        "1h",
+        "daily",
+        "weekly",
+    }
+    keyword_map = [
+        ("Sports", ["sports", "nba", "nfl", "nhl", "soccer", "tennis", "basketball", "hockey", "mlb", "ncaa", "esports", "premier-league", "epl", "ligue", "bundesliga", "serie-a", "serie-b", "la-liga", "golf", "mma", "boxing", "cricket"]),
+        ("Politics", ["politic", "election", "trump", "biden", "congress", "senate", "house", "president", "geopolitic"]),
+        ("Crypto", ["crypto", "bitcoin", "ethereum", "solana", "dogecoin", "xrp", "altcoin"]),
+        ("Economy", ["econom", "finance", "fed", "rates", "spx", "s&p", "stock", "inflation", "trade-war"]),
+        ("World", ["world", "middle-east", "ukraine", "russia", "china", "israel", "syria"]),
+        ("Technology", ["tech", "ai", "artificial-intelligence"]),
+    ]
+
+    lowered: list[tuple[str, str]] = []
+    for tag in tags:
+        label = str(tag.get("label", "")).strip().lower()
+        slug = str(tag.get("slug", "")).strip().lower()
+        lowered.append((label, slug))
+
+    for label, slug in lowered:
+        if label in canonical_by_exact:
+            return canonical_by_exact[label]
+        if slug in canonical_by_exact:
+            return canonical_by_exact[slug]
+
+    for label, slug in lowered:
+        if label in ignore or slug in ignore:
+            continue
+        hay = f"{label} {slug}"
+        for canonical, needles in keyword_map:
+            if any(n in hay for n in needles):
+                return canonical
+
+    return None
+
+
 def discover_top_volume_markets(
     client: PolymarketClient,
     config: PipelineConfig,
@@ -132,9 +222,12 @@ def discover_top_volume_markets(
     now_iso = now_utc.isoformat()
     selected: List[MarketRecord] = []
     selected_ids = set()
+    event_category_cache: dict[str, Optional[str]] = {}
     target = config.target_markets
+    vol_floor = config.min_volume
+    vol_note = f", min volume {vol_floor:,.0f}" if vol_floor > 0 else ""
     print(
-        f"[markets] discovering up to {target} markets "
+        f"[markets] discovering up to {target} markets{vol_note} "
         f"(Gamma pages <= {config.gamma_max_pages}, page size {config.gamma_page_size})...",
         flush=True,
     )
@@ -185,12 +278,34 @@ def discover_top_volume_markets(
             except (TypeError, ValueError):
                 volume_f = 0.0
 
+            if config.min_volume > 0 and volume_f < config.min_volume:
+                continue
+
+            category = _normalized_category(raw.get("category"))
+            if category is None:
+                category = _infer_category_from_tags(_extract_tag_records(raw.get("tags")))
+            if category is None:
+                event_id = _extract_primary_event_id(raw)
+                if event_id:
+                    if event_id not in event_category_cache:
+                        try:
+                            event_payload = client.get_event(event_id)
+                            event_category_cache[event_id] = (
+                                _normalized_category(event_payload.get("category"))
+                                or _infer_category_from_tags(
+                                    _extract_tag_records(event_payload.get("tags"))
+                                )
+                            )
+                        except Exception:
+                            event_category_cache[event_id] = None
+                    category = event_category_cache.get(event_id)
+
             selected.append(
                 MarketRecord(
                     market_id=market_id,
                     condition_id=condition_id,
                     question=str(raw.get("question", "")).strip(),
-                    category=raw.get("category"),
+                    category=category,
                     end_time=end_dt,
                     closed_time=_parse_dt(raw.get("closedTime")),
                     volume_total_market=volume_f,

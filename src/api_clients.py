@@ -110,3 +110,9 @@ class PolymarketClient:
             params["next_cursor"] = next_cursor
         return self._request_json("clob", f"{self.clob_base}/simplified-markets", params=params)
 
+    def get_market(self, market_id: str) -> Dict[str, Any]:
+        return self._request_json("gamma", f"{self.gamma_base}/markets/{market_id}")
+
+    def get_event(self, event_id: str) -> Dict[str, Any]:
+        return self._request_json("gamma", f"{self.gamma_base}/events/{event_id}")
+

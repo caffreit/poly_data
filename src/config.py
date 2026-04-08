@@ -4,15 +4,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
 
+# 10 / 30 min, then hourly from 1h through 24h before close, plus 48h.
+DEFAULT_HORIZONS_MINUTES: Tuple[int, ...] = (10, 30) + tuple(range(60, 1441, 60)) + (2880,)
+
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    lookback_days: int = 30
-    target_markets: int = 10000
-    horizons_minutes: Tuple[int, ...] = (10, 30, 60, 120, 240, 360, 1440, 2880)
+    lookback_days: int = 90
+    target_markets: int = 30000
+    # Minimum Gamma volumeNum (same units as API). Use 0 to disable.
+    min_volume: float = 50_000.0
+    horizons_minutes: Tuple[int, ...] = DEFAULT_HORIZONS_MINUTES
     gamma_page_size: int = 200
-    # Need enough raw pages to reach target_markets after filters (and for early exit at 2x target).
-    gamma_max_pages: int = 150
+    # Enough pages to reach target_markets after filters (page size 200; early exit at 2x target).
+    gamma_max_pages: int = 200
     clob_history_interval: str = "max"
     clob_history_fidelity: int | None = None
     request_timeout_seconds: float = 25.0

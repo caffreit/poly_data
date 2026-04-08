@@ -5,3 +5,8 @@ venv/
 .env
 *.egg-info/
 .pytest_cache/
+
+# Large generated outputs (GitHub blob limit / repo size)
+output/market_snapshots.csv
+output/mae_change_distribution_by_global_decile.csv
+output/price_change_distribution_by_global_decile.csv
