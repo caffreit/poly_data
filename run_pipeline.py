@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pandas as pd
 
 from src.api_clients import PolymarketClient
 from src.build_dataset import (
@@ -35,16 +38,20 @@ from src.config import DEFAULT_HORIZONS_MINUTES, PipelineConfig
 from src.plots import (
     save_calibration_plot,
     save_category_calibration_plot,
+    save_category_calibration_overall_plot,
     save_category_error_by_horizon_plot,
     save_category_isotonic_gap_by_horizon_plot,
     save_horizon_error_plot,
     save_isotonic_calibration_plot,
+    save_isotonic_reliability_by_category_plot,
+    save_isotonic_reliability_by_horizon_plot,
     save_lowess_calibration_plot,
     save_mae_change_distribution_explorer,
     save_mae_global_volume_bucket_plot,
     save_mae_by_volume_decile_plot,
     save_overlapping_bin_plot,
     save_price_change_distribution_explorer,
+    save_crypto_price_slice_explorer,
     save_signed_isotonic_gap_by_volume_decile_price_bin_plot,
     save_signed_error_by_price_bin_horizon_plot,
     save_signed_error_by_price_bin_plot,
@@ -61,6 +68,23 @@ from src.plots import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Polymarket mispricing initial pass")
+    parser.add_argument(
+        "--plots-only",
+        action="store_true",
+        help="Skip data collection; rebuild plots from existing CSVs in --output-dir",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("output"),
+        help="Directory for CSV artifacts (full run) or where to load them from (--plots-only)",
+    )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        default=None,
+        help="Plot output directory (default: <output-dir>/plots)",
+    )
     parser.add_argument("--target-markets", type=int, default=30000)
     parser.add_argument("--lookback-days", type=int, default=90)
     parser.add_argument(
@@ -88,8 +112,137 @@ def _safe_output_path(path: Path) -> Path:
         return path.with_name(f"{path.stem}_{ts}{path.suffix}")
 
 
+def _save_all_plots(
+    *,
+    tidy_df: pd.DataFrame,
+    calibration_df: pd.DataFrame,
+    category_calibration_df: pd.DataFrame,
+    isotonic_points_df: pd.DataFrame,
+    lowess_points_df: pd.DataFrame,
+    category_error_metrics_df: pd.DataFrame,
+    category_isotonic_metrics_df: pd.DataFrame,
+    isotonic_gap_volume_decile_df: pd.DataFrame,
+    isotonic_gap_volume_decile_price_bin_df: pd.DataFrame,
+    horizon_metrics_df: pd.DataFrame,
+    staleness_volume_df: pd.DataFrame,
+    mae_global_volume_df: pd.DataFrame,
+    joint_diag_df: pd.DataFrame,
+    control_coef_df: pd.DataFrame,
+    price_change_dist_df: pd.DataFrame,
+    mae_change_dist_df: pd.DataFrame,
+    volatility_bucket_df: pd.DataFrame,
+    plots_dir: Path,
+) -> None:
+    save_calibration_plot(calibration_df, plots_dir)
+    save_category_calibration_plot(category_calibration_df, plots_dir)
+    save_category_calibration_overall_plot(category_calibration_df, plots_dir)
+    save_isotonic_calibration_plot(isotonic_points_df, plots_dir)
+    save_isotonic_reliability_by_horizon_plot(isotonic_points_df, plots_dir)
+    save_isotonic_reliability_by_category_plot(isotonic_points_df, tidy_df, plots_dir)
+    save_lowess_calibration_plot(lowess_points_df, plots_dir)
+    save_category_error_by_horizon_plot(category_error_metrics_df, plots_dir)
+    save_category_isotonic_gap_by_horizon_plot(category_isotonic_metrics_df, plots_dir)
+    save_isotonic_gap_by_volume_decile_plot(isotonic_gap_volume_decile_df, plots_dir)
+    save_signed_isotonic_gap_by_volume_decile_price_bin_plot(
+        isotonic_gap_volume_decile_price_bin_df, plots_dir
+    )
+    save_horizon_error_plot(horizon_metrics_df, plots_dir)
+    save_volume_bucket_plot(tidy_df, plots_dir)
+    save_mae_by_volume_decile_plot(tidy_df, plots_dir)
+    save_staleness_by_volume_decile_plot(staleness_volume_df, plots_dir)
+    save_mae_global_volume_bucket_plot(mae_global_volume_df, plots_dir)
+    save_volume_error_joint_diagnostics_plot(joint_diag_df, plots_dir)
+    save_volume_error_control_coefficients_plot(control_coef_df, plots_dir)
+    save_price_change_distribution_explorer(price_change_dist_df, plots_dir)
+    save_mae_change_distribution_explorer(mae_change_dist_df, plots_dir)
+    save_crypto_price_slice_explorer(tidy_df, plots_dir)
+    save_overlapping_bin_plot(tidy_df, plots_dir, bin_width=0.02, stride=0.01)
+    save_signed_error_by_price_bin_plot(tidy_df, plots_dir, bin_width=0.1, stride=0.02)
+    save_signed_error_by_price_bin_horizon_plot(
+        tidy_df, plots_dir, bin_width=0.1, stride=0.02
+    )
+    save_signed_error_by_volume_decile_price_bin_plot(
+        tidy_df, plots_dir, bin_width=0.1, stride=0.1
+    )
+    save_volatility_isotonic_gap_plot(volatility_bucket_df, plots_dir)
+    save_volatility_realized_error_plot(volatility_bucket_df, plots_dir)
+
+
+def _load_csv_required(output_dir: Path, name: str) -> pd.DataFrame:
+    path = output_dir / name
+    if not path.is_file():
+        print(f"Missing required artifact: {path}", file=sys.stderr)
+        sys.exit(1)
+    return pd.read_csv(path)
+
+
+def regenerate_plots_from_artifacts(output_dir: Path, plots_dir: Path) -> None:
+    """Rebuild all HTML/PNG plots from CSVs written by a full pipeline run (no API calls)."""
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    tidy_df = _load_csv_required(output_dir, "market_snapshots.csv")
+    calibration_df = _load_csv_required(output_dir, "calibration_by_horizon.csv")
+    category_calibration_df = _load_csv_required(output_dir, "category_calibration_by_horizon.csv")
+    isotonic_points_df = _load_csv_required(output_dir, "isotonic_points_by_horizon.csv")
+    lowess_points_df = _load_csv_required(output_dir, "lowess_points_by_horizon.csv")
+    category_error_metrics_df = _load_csv_required(output_dir, "category_horizon_error_metrics.csv")
+    category_isotonic_metrics_df = _load_csv_required(
+        output_dir, "category_isotonic_horizon_metrics.csv"
+    )
+    isotonic_gap_volume_decile_df = _load_csv_required(
+        output_dir, "isotonic_gap_by_volume_decile.csv"
+    )
+    isotonic_gap_volume_decile_price_bin_df = _load_csv_required(
+        output_dir, "isotonic_gap_by_volume_decile_price_bin.csv"
+    )
+    horizon_metrics_df = _load_csv_required(output_dir, "horizon_metrics.csv")
+    staleness_volume_df = _load_csv_required(
+        output_dir, "staleness_by_horizon_volume_decile.csv"
+    )
+    mae_global_volume_df = _load_csv_required(
+        output_dir, "mae_by_horizon_global_volume_decile.csv"
+    )
+    joint_diag_df = _load_csv_required(output_dir, "volume_error_joint_diagnostics.csv")
+    control_coef_df = _load_csv_required(
+        output_dir, "volume_error_control_coefficients.csv"
+    )
+    price_change_dist_df = _load_csv_required(
+        output_dir, "price_change_distribution_by_global_decile.csv"
+    )
+    mae_change_dist_df = _load_csv_required(
+        output_dir, "mae_change_distribution_by_global_decile.csv"
+    )
+    volatility_bucket_df = _load_csv_required(output_dir, "volatility_bucket_summary.csv")
+    _save_all_plots(
+        tidy_df=tidy_df,
+        calibration_df=calibration_df,
+        category_calibration_df=category_calibration_df,
+        isotonic_points_df=isotonic_points_df,
+        lowess_points_df=lowess_points_df,
+        category_error_metrics_df=category_error_metrics_df,
+        category_isotonic_metrics_df=category_isotonic_metrics_df,
+        isotonic_gap_volume_decile_df=isotonic_gap_volume_decile_df,
+        isotonic_gap_volume_decile_price_bin_df=isotonic_gap_volume_decile_price_bin_df,
+        horizon_metrics_df=horizon_metrics_df,
+        staleness_volume_df=staleness_volume_df,
+        mae_global_volume_df=mae_global_volume_df,
+        joint_diag_df=joint_diag_df,
+        control_coef_df=control_coef_df,
+        price_change_dist_df=price_change_dist_df,
+        mae_change_dist_df=mae_change_dist_df,
+        volatility_bucket_df=volatility_bucket_df,
+        plots_dir=plots_dir,
+    )
+
+
 def main() -> None:
     args = parse_args()
+    if args.plots_only:
+        output_dir = args.output_dir
+        plots_dir = args.plots_dir if args.plots_dir is not None else output_dir / "plots"
+        regenerate_plots_from_artifacts(output_dir, plots_dir)
+        print(f"Plots written to {plots_dir.resolve()}")
+        return
+
     horizons = tuple(int(h.strip()) for h in args.horizons.split(",") if h.strip())
 
     config = PipelineConfig(
@@ -97,6 +250,8 @@ def main() -> None:
         lookback_days=args.lookback_days,
         min_volume=args.min_volume,
         horizons_minutes=horizons,
+        output_dir=args.output_dir,
+        plots_dir=args.plots_dir if args.plots_dir is not None else args.output_dir / "plots",
     )
     config.ensure_output_dirs()
 
@@ -235,35 +390,26 @@ def main() -> None:
         price_change_dist_df.to_csv(price_change_dist_path, index=False)
         mae_change_dist_df.to_csv(mae_change_dist_path, index=False)
 
-        save_calibration_plot(calibration_df, config.plots_dir)
-        save_category_calibration_plot(category_calibration_df, config.plots_dir)
-        save_isotonic_calibration_plot(isotonic_points_df, config.plots_dir)
-        save_lowess_calibration_plot(lowess_points_df, config.plots_dir)
-        save_category_error_by_horizon_plot(category_error_metrics_df, config.plots_dir)
-        save_category_isotonic_gap_by_horizon_plot(category_isotonic_metrics_df, config.plots_dir)
-        save_isotonic_gap_by_volume_decile_plot(isotonic_gap_volume_decile_df, config.plots_dir)
-        save_signed_isotonic_gap_by_volume_decile_price_bin_plot(
-            isotonic_gap_volume_decile_price_bin_df, config.plots_dir
+        _save_all_plots(
+            tidy_df=tidy_df,
+            calibration_df=calibration_df,
+            category_calibration_df=category_calibration_df,
+            isotonic_points_df=isotonic_points_df,
+            lowess_points_df=lowess_points_df,
+            category_error_metrics_df=category_error_metrics_df,
+            category_isotonic_metrics_df=category_isotonic_metrics_df,
+            isotonic_gap_volume_decile_df=isotonic_gap_volume_decile_df,
+            isotonic_gap_volume_decile_price_bin_df=isotonic_gap_volume_decile_price_bin_df,
+            horizon_metrics_df=horizon_metrics_df,
+            staleness_volume_df=staleness_volume_df,
+            mae_global_volume_df=mae_global_volume_df,
+            joint_diag_df=joint_diag_df,
+            control_coef_df=control_coef_df,
+            price_change_dist_df=price_change_dist_df,
+            mae_change_dist_df=mae_change_dist_df,
+            volatility_bucket_df=volatility_bucket_df,
+            plots_dir=config.plots_dir,
         )
-        save_horizon_error_plot(horizon_metrics_df, config.plots_dir)
-        save_volume_bucket_plot(tidy_df, config.plots_dir)
-        save_mae_by_volume_decile_plot(tidy_df, config.plots_dir)
-        save_staleness_by_volume_decile_plot(staleness_volume_df, config.plots_dir)
-        save_mae_global_volume_bucket_plot(mae_global_volume_df, config.plots_dir)
-        save_volume_error_joint_diagnostics_plot(joint_diag_df, config.plots_dir)
-        save_volume_error_control_coefficients_plot(control_coef_df, config.plots_dir)
-        save_price_change_distribution_explorer(price_change_dist_df, config.plots_dir)
-        save_mae_change_distribution_explorer(mae_change_dist_df, config.plots_dir)
-        save_overlapping_bin_plot(tidy_df, config.plots_dir, bin_width=0.02, stride=0.01)
-        save_signed_error_by_price_bin_plot(tidy_df, config.plots_dir, bin_width=0.1, stride=0.02)
-        save_signed_error_by_price_bin_horizon_plot(
-            tidy_df, config.plots_dir, bin_width=0.1, stride=0.02
-        )
-        save_signed_error_by_volume_decile_price_bin_plot(
-            tidy_df, config.plots_dir, bin_width=0.1, stride=0.1
-        )
-        save_volatility_isotonic_gap_plot(volatility_bucket_df, config.plots_dir)
-        save_volatility_realized_error_plot(volatility_bucket_df, config.plots_dir)
 
         elapsed = time.perf_counter() - start
         diagnostics = {

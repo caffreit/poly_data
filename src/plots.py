@@ -8,6 +8,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from src.build_dataset import _normalized_category_labels
+
 # HTML and static image export size (Plotly default ~700×500 is small for slides/reports).
 FIGURE_WIDTH = 1600
 FIGURE_HEIGHT = 1000
@@ -153,6 +155,201 @@ def save_calibration_plot(calibration_df: pd.DataFrame, plots_dir: Path) -> Path
         fig.update_yaxes(range=[0, 1])
         _add_perfect_calibration_line(fig)
 
+    _write_figure_outputs(fig, output_html, output_png)
+    return output_html
+
+
+def _isotonic_reliability_binned(
+    df: pd.DataFrame,
+    group_keys: list[str],
+    bin_width: float,
+    stride: float,
+) -> pd.DataFrame:
+    """Overlapping bins on calibrated_prob; mean outcome_yes rate per bin within each group."""
+    need = set(group_keys) | {"calibrated_prob", "outcome_yes"}
+    if df.empty or not need.issubset(df.columns):
+        return pd.DataFrame()
+
+    d = df.dropna(subset=["calibrated_prob", "outcome_yes"]).copy()
+    if d.empty:
+        return pd.DataFrame()
+
+    d["calibrated_prob"] = d["calibrated_prob"].clip(0, 1).astype(float)
+    starts = _overlapping_price_bin_starts(bin_width, stride)
+    rows: list[dict] = []
+    for gkey, d_g in d.groupby(group_keys, dropna=False):
+        keys = gkey if isinstance(gkey, tuple) else (gkey,)
+        for start in starts:
+            end = min(1.0, start + bin_width)
+            if end >= 1.0:
+                in_bin = d_g[
+                    (d_g["calibrated_prob"] >= start) & (d_g["calibrated_prob"] <= end)
+                ]
+            else:
+                in_bin = d_g[
+                    (d_g["calibrated_prob"] >= start) & (d_g["calibrated_prob"] < end)
+                ]
+            if in_bin.empty:
+                continue
+            row = {k: v for k, v in zip(group_keys, keys)}
+            row["bin_start"] = start
+            row["bin_end"] = end
+            row["bin_mid"] = (start + end) / 2.0
+            row["mean_calibrated_prob"] = float(in_bin["calibrated_prob"].mean())
+            row["outcome_rate"] = float(in_bin["outcome_yes"].mean())
+            row["n"] = int(len(in_bin))
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def save_isotonic_reliability_by_horizon_plot(
+    isotonic_points_df: pd.DataFrame,
+    plots_dir: Path,
+    bin_width: float = 0.05,
+    stride: float = 0.025,
+) -> Path:
+    """Reliability: x = isotonic calibrated probability (binned), y = fraction resolving YES, by horizon."""
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    output_html = plots_dir / "isotonic_reliability_by_horizon.html"
+    output_png = plots_dir / "isotonic_reliability_by_horizon.png"
+
+    if isotonic_points_df.empty:
+        fig = px.line(title="No isotonic reliability data available")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    plot_df = _isotonic_reliability_binned(
+        isotonic_points_df,
+        ["horizon_min"],
+        bin_width=bin_width,
+        stride=stride,
+    )
+    if plot_df.empty:
+        fig = px.line(title="No isotonic reliability bin aggregates available")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    plot_df = plot_df.sort_values(["horizon_min", "mean_calibrated_prob"])
+    plot_df["horizon_label"] = plot_df["horizon_min"].map(lambda m: f"{int(m)} min")
+    horizon_order = [f"{int(m)} min" for m in sorted(plot_df["horizon_min"].dropna().unique())]
+
+    fig = px.line(
+        plot_df,
+        x="mean_calibrated_prob",
+        y="outcome_rate",
+        color="horizon_label",
+        markers=True,
+        category_orders={"horizon_label": horizon_order},
+        hover_data=[
+            "horizon_min",
+            "bin_start",
+            "bin_end",
+            "n",
+            "bin_mid",
+        ],
+        title=(
+            "Reliability vs isotonic calibrated probability by horizon "
+            f"(overlapping bins: width={bin_width}, stride={stride})"
+        ),
+        labels={
+            "mean_calibrated_prob": "Isotonic calibrated probability (mean in bin)",
+            "outcome_rate": "Fraction resolving YES (outcome = 1)",
+            "horizon_label": "Horizon",
+        },
+    )
+    fig.update_xaxes(range=[0, 1])
+    fig.update_yaxes(range=[0, 1])
+    _add_perfect_calibration_line(fig)
+    _write_figure_outputs(fig, output_html, output_png)
+    return output_html
+
+
+def save_isotonic_reliability_by_category_plot(
+    isotonic_points_df: pd.DataFrame,
+    tidy_df: pd.DataFrame,
+    plots_dir: Path,
+    min_total_n: int = 250,
+    bin_width: float = 0.05,
+    stride: float = 0.025,
+) -> Path:
+    """Reliability by category; all horizons pooled (each row still uses that horizon's isotonic map)."""
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    output_html = plots_dir / "isotonic_reliability_by_category.html"
+    output_png = plots_dir / "isotonic_reliability_by_category.png"
+
+    required_iso = {"market_id", "horizon_min", "calibrated_prob", "outcome_yes"}
+    if isotonic_points_df.empty or not required_iso.issubset(isotonic_points_df.columns):
+        fig = px.line(title="No isotonic reliability data available")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+    if tidy_df.empty or "category" not in tidy_df.columns:
+        fig = px.line(title="No category column on tidy data for isotonic reliability plot")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    cat_map = (
+        tidy_df[["market_id", "horizon_min", "category"]]
+        .drop_duplicates(subset=["market_id", "horizon_min"])
+        .copy()
+    )
+    cat_map["category"] = _normalized_category_labels(cat_map["category"])
+    merged = isotonic_points_df.merge(cat_map, on=["market_id", "horizon_min"], how="left")
+    merged["category"] = _normalized_category_labels(merged["category"])
+
+    base = merged.dropna(subset=["calibrated_prob", "outcome_yes"])
+    cat_counts = base.groupby("category", dropna=False).size()
+    keep_cats = cat_counts[cat_counts >= min_total_n].index.tolist()
+    if not keep_cats:
+        fig = px.line(title="No categories meet minimum sample threshold for plotting")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    merged = merged[merged["category"].isin(keep_cats)].copy()
+    plot_df = _isotonic_reliability_binned(
+        merged,
+        ["category"],
+        bin_width=bin_width,
+        stride=stride,
+    )
+    if plot_df.empty:
+        fig = px.line(title="No isotonic reliability bin aggregates available")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    category_order = (
+        base[base["category"].isin(keep_cats)]
+        .groupby("category", dropna=False)
+        .size()
+        .sort_values(ascending=False)
+        .index.tolist()
+    )
+    plot_df["category"] = pd.Categorical(
+        plot_df["category"], categories=category_order, ordered=True
+    )
+    plot_df = plot_df.sort_values(["category", "mean_calibrated_prob"])
+
+    fig = px.line(
+        plot_df,
+        x="mean_calibrated_prob",
+        y="outcome_rate",
+        color="category",
+        markers=True,
+        category_orders={"category": category_order},
+        hover_data=["bin_start", "bin_end", "n", "bin_mid"],
+        title=(
+            f"Reliability vs isotonic calibrated probability by category "
+            f"(all horizons pooled; categories with n >= {min_total_n}; "
+            f"bins width={bin_width}, stride={stride})"
+        ),
+        labels={
+            "mean_calibrated_prob": "Isotonic calibrated probability (mean in bin)",
+            "outcome_rate": "Fraction resolving YES (outcome = 1)",
+            "category": "Category",
+        },
+    )
+    fig.update_xaxes(range=[0, 1])
+    fig.update_yaxes(range=[0, 1])
+    _add_perfect_calibration_line(fig)
     _write_figure_outputs(fig, output_html, output_png)
     return output_html
 
@@ -354,6 +551,83 @@ def save_category_calibration_plot(
             "observed_yes_rate": "Observed YES rate",
             "category": "Category",
             "horizon_label": "Horizon",
+        },
+    )
+    fig.update_xaxes(range=[0, 1])
+    fig.update_yaxes(range=[0, 1])
+    _add_perfect_calibration_line(fig)
+    _write_figure_outputs(fig, output_html, output_png)
+    return output_html
+
+
+def save_category_calibration_overall_plot(
+    category_calibration_df: pd.DataFrame,
+    plots_dir: Path,
+    min_total_n: int = 250,
+) -> Path:
+    """Category calibration curves aggregated across all horizons."""
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    output_html = plots_dir / "category_calibration_overall.html"
+    output_png = plots_dir / "category_calibration_overall.png"
+
+    if category_calibration_df.empty:
+        fig = px.line(title="No category calibration data available")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    base_df = _filter_categories_for_plot(category_calibration_df, min_total_n=min_total_n)
+    if base_df.empty:
+        fig = px.line(title="No categories meet minimum sample threshold for plotting")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    def _weighted_mean(group: pd.DataFrame, value_col: str, weight_col: str = "n") -> float:
+        vals = pd.to_numeric(group[value_col], errors="coerce")
+        w = pd.to_numeric(group[weight_col], errors="coerce")
+        valid = vals.notna() & w.notna() & (w > 0)
+        if not valid.any():
+            return float("nan")
+        return float(np.average(vals[valid], weights=w[valid]))
+
+    rows: list[dict] = []
+    for (category, prob_bin), g in base_df.groupby(
+        ["category", "prob_bin"], dropna=False, observed=True
+    ):
+        rows.append(
+            {
+                "category": category,
+                "prob_bin": prob_bin,
+                "n": int(pd.to_numeric(g["n"], errors="coerce").fillna(0).sum()),
+                "predicted_mean": _weighted_mean(g, "predicted_mean"),
+                "observed_yes_rate": _weighted_mean(g, "observed_yes_rate"),
+                "volume_mean": _weighted_mean(g, "volume_mean"),
+            }
+        )
+    plot_df = pd.DataFrame(rows)
+    if plot_df.empty:
+        fig = px.line(title="No aggregated category calibration data available")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    category_order = (
+        plot_df.groupby("category", dropna=False)["n"].sum().sort_values(ascending=False).index.tolist()
+    )
+    plot_df["category"] = pd.Categorical(plot_df["category"], categories=category_order, ordered=True)
+    plot_df = plot_df.sort_values(["category", "predicted_mean"])
+
+    fig = px.line(
+        plot_df,
+        x="predicted_mean",
+        y="observed_yes_rate",
+        color="category",
+        markers=True,
+        category_orders={"category": category_order},
+        hover_data={"prob_bin": True, "n": True, "volume_mean": ":,.0f"},
+        title=f"Category Calibration Curves (All Horizons, categories with n >= {min_total_n})",
+        labels={
+            "predicted_mean": "Mean predicted YES probability",
+            "observed_yes_rate": "Observed YES rate",
+            "category": "Category",
         },
     )
     fig.update_xaxes(range=[0, 1])
@@ -1470,6 +1744,432 @@ def save_mae_change_distribution_explorer(
     decileSelect.addEventListener('change', refreshFromOptions);
     fromSelect.addEventListener('change', refreshToOptions);
     toSelect.addEventListener('change', render);
+  </script>
+</body>
+</html>
+"""
+    output_html.write_text(html, encoding="utf-8")
+    return output_html
+
+
+def save_crypto_price_slice_explorer(
+    tidy_df: pd.DataFrame,
+    plots_dir: Path,
+    *,
+    default_price_low: float = 0.49,
+    default_price_high: float = 0.51,
+    default_num_bins: int = 10,
+) -> Path:
+    """Interactive histogram of last-trade prices in a zoomable range for Crypto markets by horizon.
+
+    The page embeds raw price/outcome pairs per horizon; bin edges are chosen in the browser via
+    either a fixed bin count or a fixed bin width inside [price_low, price_high].
+    """
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    output_html = plots_dir / "crypto_price_slice_explorer.html"
+    output_png = plots_dir / "crypto_price_slice_explorer.png"
+
+    required = {"category", "horizon_min", "price_last_trade", "outcome_yes"}
+    if tidy_df.empty or not required.issubset(set(tidy_df.columns)):
+        fig = px.bar(title="No snapshot data available for crypto price slice explorer")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    df = tidy_df.dropna(subset=["horizon_min", "price_last_trade", "outcome_yes"]).copy()
+    if df.empty:
+        fig = px.bar(title="No valid price/outcome rows for crypto price slice explorer")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    df["category"] = _normalized_category_labels(df.get("category", pd.Series(index=df.index, dtype=object)))
+    df = df[df["category"].astype(str) == "Crypto"].copy()
+    if df.empty:
+        fig = px.bar(title="No Crypto category rows in snapshot data")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    df["horizon_min"] = df["horizon_min"].astype(int)
+    df["price_last_trade"] = df["price_last_trade"].astype(float).clip(0.0, 1.0)
+    df["outcome_yes"] = df["outcome_yes"].astype(float)
+
+    data_by_horizon: dict[str, dict[str, list[float]]] = {}
+    horizons_sorted: list[int] = []
+    for h, g in df.groupby("horizon_min", sort=True):
+        hi = int(h)
+        horizons_sorted.append(hi)
+        data_by_horizon[str(hi)] = {
+            "p": g["price_last_trade"].tolist(),
+            "y": g["outcome_yes"].tolist(),
+        }
+
+    if not data_by_horizon:
+        fig = px.bar(title="No per-horizon crypto data to embed")
+        _write_figure_outputs(fig, output_html, None)
+        return output_html
+
+    default_h = min(horizons_sorted)
+    payload = json.dumps(data_by_horizon, separators=(",", ":"))
+    horizons_json = json.dumps([str(h) for h in horizons_sorted])
+
+    # Default PNG: histogram + observed YES rate by bin for the default slice.
+    def _slice_histogram(
+        prices: np.ndarray,
+        outcomes: np.ndarray,
+        lo: float,
+        hi: float,
+        n_bins: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        m = (prices >= lo) & (prices <= hi)
+        pv, ov = prices[m], outcomes[m]
+        if pv.size == 0:
+            return np.array([]), np.array([]), np.array([]), np.array([])
+        edges = np.linspace(lo, hi, int(n_bins) + 1)
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        counts = np.zeros(n_bins, dtype=int)
+        sums = np.zeros(n_bins, dtype=float)
+        idx = np.minimum(
+            np.searchsorted(edges, pv, side="right") - 1,
+            n_bins - 1,
+        )
+        idx = np.clip(idx, 0, n_bins - 1)
+        for i in range(n_bins):
+            sel = idx == i
+            counts[i] = int(np.sum(sel))
+            sums[i] = float(np.sum(ov[sel])) if np.any(sel) else 0.0
+        rates = np.divide(
+            sums,
+            np.maximum(counts, 1),
+            out=np.zeros_like(sums, dtype=float),
+            where=counts > 0,
+        )
+        return centers, counts.astype(float), rates, edges
+
+    d0 = data_by_horizon[str(default_h)]
+    p0 = np.asarray(d0["p"], dtype=float)
+    y0 = np.asarray(d0["y"], dtype=float)
+    xc, cnt, rate, _edges = _slice_histogram(
+        p0, y0, default_price_low, default_price_high, default_num_bins
+    )
+    if xc.size > 0:
+        fig_png = go.Figure(
+            data=[
+                go.Bar(
+                    x=xc,
+                    y=cnt,
+                    name="Count",
+                    marker_color="rgba(55, 126, 184, 0.7)",
+                    yaxis="y",
+                    hovertemplate="Bin center: %{x:.4f}<br>Count: %{y}<extra></extra>",
+                ),
+                go.Scatter(
+                    x=xc,
+                    y=rate,
+                    name="Observed YES rate",
+                    mode="lines+markers",
+                    yaxis="y2",
+                    line={"color": "rgba(214, 39, 40, 0.9)", "width": 2},
+                    marker={"size": 8},
+                    hovertemplate="Bin center: %{x:.4f}<br>YES rate: %{y:.4f}<extra></extra>",
+                ),
+            ]
+        )
+        fig_png.add_trace(
+            go.Scatter(
+                x=[default_price_low, default_price_high],
+                y=[default_price_low, default_price_high],
+                name="Perfect calibration",
+                mode="lines",
+                yaxis="y2",
+                line={"dash": "dash", "color": "rgba(0,0,0,0.35)", "width": 1},
+                hoverinfo="skip",
+            )
+        )
+        fig_png.update_layout(
+            title=(
+                f"Crypto last-trade price slice (default): {default_h} min, "
+                f"[{default_price_low}, {default_price_high}], {default_num_bins} bins"
+            ),
+            xaxis_title="Price (last trade)",
+            yaxis=dict(title="Market count", side="left", showgrid=True),
+            yaxis2=dict(
+                title="Observed YES rate",
+                side="right",
+                overlaying="y",
+                range=[0, 1],
+                showgrid=False,
+            ),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            bargap=0.08,
+            width=FIGURE_WIDTH,
+            height=FIGURE_HEIGHT,
+            autosize=False,
+        )
+        try:
+            fig_png.write_image(
+                output_png,
+                width=FIGURE_WIDTH,
+                height=FIGURE_HEIGHT,
+                scale=1,
+            )
+        except Exception:
+            pass
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Crypto price slice explorer</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 16px; }}
+    .controls {{ display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }}
+    .controls label {{ font-size: 14px; display: flex; flex-direction: column; gap: 4px; }}
+    .controls input[type="number"], .controls select {{ padding: 4px 6px; min-width: 100px; }}
+    .mode {{ flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; }}
+    .mode label {{ flex-direction: row; align-items: center; gap: 6px; }}
+    .statline {{ margin: 6px 0 12px 0; font-size: 14px; max-width: 1600px; }}
+    #plot {{ width: 100%; max-width: 1600px; height: 1000px; }}
+  </style>
+</head>
+<body>
+  <h2>Crypto markets: price slice explorer (by time-to-close horizon)</h2>
+  <p style="max-width:960px;font-size:14px;">
+    Crypto rows only. Choose a horizon, a price window (e.g. 0.49–0.51), and either a number of equal-width
+    bins inside that window or a fixed bin width. The bars are counts per bin; the red trace is the observed
+    YES rate (secondary axis). The dashed line is y = x for calibration reference on that axis.
+  </p>
+  <div class="controls">
+    <label>Horizon (minutes)
+      <select id="horizonSelect"></select>
+    </label>
+    <label>Price low
+      <input type="number" id="priceLow" step="0.0001" min="0" max="1" value="{default_price_low}" />
+    </label>
+    <label>Price high
+      <input type="number" id="priceHigh" step="0.0001" min="0" max="1" value="{default_price_high}" />
+    </label>
+    <div class="mode">
+      <span style="font-size:14px;">Bins:</span>
+      <label><input type="radio" name="binMode" id="modeCount" value="count" checked /> Fixed count</label>
+      <label><input type="radio" name="binMode" id="modeWidth" value="width" /> Fixed width</label>
+    </div>
+    <label>Number of bins
+      <input type="number" id="numBins" step="1" min="2" max="500" value="{default_num_bins}" />
+    </label>
+    <label>Bin width
+      <input type="number" id="binWidth" step="0.0001" min="1e-6" value="0.002" />
+    </label>
+    <button type="button" id="applyBtn" style="padding:8px 14px;">Update plot</button>
+  </div>
+  <div id="statline" class="statline"></div>
+  <div id="plot"></div>
+
+  <script>
+    const dataByHorizon = {payload};
+    const horizonOrder = {horizons_json};
+
+    const horizonSelect = document.getElementById('horizonSelect');
+    const priceLowEl = document.getElementById('priceLow');
+    const priceHighEl = document.getElementById('priceHigh');
+    const modeCountEl = document.getElementById('modeCount');
+    const numBinsEl = document.getElementById('numBins');
+    const binWidthEl = document.getElementById('binWidth');
+    const applyBtn = document.getElementById('applyBtn');
+    const statline = document.getElementById('statline');
+
+    function setHorizonOptions() {{
+      horizonSelect.innerHTML = '';
+      horizonOrder.forEach(h => {{
+        const opt = document.createElement('option');
+        opt.value = h;
+        opt.textContent = h + ' min';
+        horizonSelect.appendChild(opt);
+      }});
+    }}
+
+    function buildEdgesFromCount(lo, hi, n) {{
+      const edges = [];
+      for (let i = 0; i <= n; i++) {{
+        edges.push(lo + (i / n) * (hi - lo));
+      }}
+      return edges;
+    }}
+
+    function buildEdgesFromWidth(lo, hi, w) {{
+      const edges = [lo];
+      const eps = 1e-12;
+      while (edges[edges.length - 1] < hi - eps) {{
+        const next = edges[edges.length - 1] + w;
+        if (next >= hi) {{
+          edges.push(hi);
+          break;
+        }}
+        edges.push(next);
+      }}
+      if (edges[edges.length - 1] < hi - eps) edges.push(hi);
+      return edges;
+    }}
+
+    function upperBound(arr, x) {{
+      let lo = 0, hi = arr.length;
+      while (lo < hi) {{
+        const mid = (lo + hi) >> 1;
+        if (arr[mid] <= x) lo = mid + 1;
+        else hi = mid;
+      }}
+      return lo;
+    }}
+
+    function histogramInSlice(pArr, yArr, lo, hi, edges) {{
+      const nBin = edges.length - 1;
+      const counts = new Array(nBin).fill(0);
+      const sumY = new Array(nBin).fill(0);
+      let nIn = 0;
+      let sumP = 0;
+      let sumAllY = 0;
+      for (let i = 0; i < pArr.length; i++) {{
+        const p = pArr[i];
+        const y = yArr[i];
+        if (p < lo || p > hi) continue;
+        nIn++;
+        sumP += p;
+        sumAllY += y;
+        let b = upperBound(edges, p) - 1;
+        if (b < 0) b = 0;
+        if (b >= nBin) b = nBin - 1;
+        counts[b]++;
+        sumY[b] += y;
+      }}
+      const centers = [];
+      const rates = [];
+      for (let bj = 0; bj < nBin; bj++) {{
+        centers.push((edges[bj] + edges[bj + 1]) / 2);
+        rates.push(counts[bj] > 0 ? sumY[bj] / counts[bj] : null);
+      }}
+      return {{
+        nIn, nTotal: pArr.length, sumP, sumAllY, counts, centers, rates, edges, nBin
+      }};
+    }}
+
+    function render() {{
+      const h = horizonSelect.value;
+      const pack = dataByHorizon[h];
+      if (!pack) {{
+        statline.textContent = 'No data for this horizon.';
+        return;
+      }}
+      const lo = parseFloat(priceLowEl.value);
+      const hi = parseFloat(priceHighEl.value);
+      if (!(lo < hi) || lo < 0 || hi > 1) {{
+        statline.textContent = 'Need 0 ≤ price low < price high ≤ 1.';
+        Plotly.purge('plot');
+        return;
+      }}
+
+      let edges;
+      let modeLabel;
+      if (modeCountEl.checked) {{
+        let n = parseInt(numBinsEl.value, 10);
+        if (!Number.isFinite(n)) n = 10;
+        n = Math.max(2, Math.min(500, n));
+        edges = buildEdgesFromCount(lo, hi, n);
+        modeLabel = `${{n}} equal-width bins`;
+      }} else {{
+        let w = parseFloat(binWidthEl.value);
+        if (!(w > 0)) {{
+          statline.textContent = 'Bin width must be positive.';
+          Plotly.purge('plot');
+          return;
+        }}
+        if (w > hi - lo) {{
+          statline.textContent = 'Bin width should not exceed (price high − price low).';
+          Plotly.purge('plot');
+          return;
+        }}
+        edges = buildEdgesFromWidth(lo, hi, w);
+        modeLabel = `${{edges.length - 1}} bins of width ${{w}}`;
+      }}
+
+      const {{ nIn, nTotal, sumP, sumAllY, counts, centers, rates }} = histogramInSlice(
+        pack.p, pack.y, lo, hi, edges
+      );
+
+      const rateNumeric = rates.map(v => (v === null ? null : v));
+
+      const traceBar = {{
+        type: 'bar',
+        x: centers,
+        y: counts,
+        name: 'Count',
+        marker: {{ color: 'rgba(55, 126, 184, 0.7)' }},
+        yaxis: 'y',
+        hovertemplate: 'Bin center: %{{x:.4f}}<br>Count: %{{y}}<extra></extra>',
+      }};
+      const traceRate = {{
+        type: 'scatter',
+        x: centers,
+        y: rateNumeric,
+        name: 'Observed YES rate',
+        mode: 'lines+markers',
+        yaxis: 'y2',
+        connectgaps: false,
+        line: {{ color: 'rgba(214, 39, 40, 0.9)', width: 2 }},
+        marker: {{ size: 8 }},
+        hovertemplate: 'Bin center: %{{x:.4f}}<br>YES rate: %{{y:.4f}}<extra></extra>',
+      }};
+      const traceDiag = {{
+        type: 'scatter',
+        x: [lo, hi],
+        y: [lo, hi],
+        name: 'Perfect calibration',
+        mode: 'lines',
+        yaxis: 'y2',
+        line: {{ dash: 'dash', color: 'rgba(0,0,0,0.35)', width: 1 }},
+        hoverinfo: 'skip',
+      }};
+
+      const layout = {{
+        title: `Crypto: horizon ${{h}} min | window [${{lo.toFixed(4)}}, ${{hi.toFixed(4)}}] | ${{modeLabel}}`,
+        xaxis: {{ title: 'Price (last trade)' }},
+        yaxis: {{ title: 'Market count', side: 'left', showgrid: true }},
+        yaxis2: {{
+          title: 'Observed YES rate',
+          side: 'right',
+          overlaying: 'y',
+          range: [0, 1],
+          showgrid: false,
+        }},
+        legend: {{ orientation: 'h', yanchor: 'bottom', y: 1.02, xanchor: 'right', x: 1 }},
+        bargap: 0.08,
+        width: {FIGURE_WIDTH},
+        height: {FIGURE_HEIGHT},
+      }};
+
+      Plotly.react('plot', [traceBar, traceRate, traceDiag], layout, {{ responsive: true }});
+
+      const meanP = nIn > 0 ? sumP / nIn : NaN;
+      const meanY = nIn > 0 ? sumAllY / nIn : NaN;
+      statline.textContent =
+        `n in window=${{nIn}} (of ${{nTotal}} at this horizon) | mean price=${{meanP.toFixed(4)}} | ` +
+        `mean outcome=${{meanY.toFixed(4)}} | bins=${{counts.length}}`;
+    }}
+
+    setHorizonOptions();
+    horizonSelect.addEventListener('change', render);
+    applyBtn.addEventListener('click', render);
+    modeCountEl.addEventListener('change', render);
+    document.getElementById('modeWidth').addEventListener('change', render);
+
+    let debounce = null;
+    function debouncedRender() {{
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(render, 280);
+    }}
+    [priceLowEl, priceHighEl, numBinsEl, binWidthEl].forEach(el => {{
+      el.addEventListener('input', debouncedRender);
+    }});
+
+    render();
   </script>
 </body>
 </html>

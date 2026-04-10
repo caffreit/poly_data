@@ -18,6 +18,7 @@ class SnapshotRow:
     category: Optional[str]
     token_id_yes: str
     end_time: datetime
+    closed_time: Optional[datetime]
     snapshot_time: datetime
     horizon_min: int
     price_last_trade: Optional[float]
@@ -121,6 +122,7 @@ def build_snapshot_rows(
                     category=market.category,
                     token_id_yes=market.token_id_yes,
                     end_time=market.end_time.astimezone(timezone.utc),
+                    closed_time=market.closed_time.astimezone(timezone.utc) if market.closed_time else None,
                     snapshot_time=snap_dt.astimezone(timezone.utc),
                     horizon_min=horizon,
                     price_last_trade=yes_last_trade,

@@ -1,0 +1,63 @@
+{
+  "status": "ok",
+  "config": {
+    "snapshots_csv": "output\\market_snapshots.csv",
+    "output_dir": "output\\strategy",
+    "category": "Sports",
+    "horizon_min": 120,
+    "train_ratio": 0.7,
+    "starting_bankroll": 1000.0,
+    "entry_threshold": 0.02,
+    "kelly_fraction": 0.25,
+    "max_bet_fraction": 0.1,
+    "fixed_stake_usd": 25.0,
+    "min_price": 0.01,
+    "max_price": 0.99
+  },
+  "coverage": {
+    "rows_total": 810000,
+    "rows_after_category": 242001,
+    "rows_after_horizon": 8963,
+    "rows_after_required_fields": 1565,
+    "rows_after_numeric_cast": 1565,
+    "rows_after_price_band": 1270,
+    "rows_final": 1270,
+    "unique_markets_final": 1270,
+    "rows_train": 457,
+    "rows_test": 813
+  },
+  "results": {
+    "strategy": {
+      "trades": 232,
+      "hit_rate": 0.4870689655172414,
+      "avg_edge": 0.00887734631402473,
+      "total_pnl": 1344.637013098611,
+      "final_wallet": 2344.637013098611,
+      "total_return": 1.3446370130986112,
+      "max_drawdown": -0.5393668813612749
+    },
+    "baseline_no_trade": {
+      "final_wallet": 1000.0,
+      "total_return": 0.0
+    },
+    "baseline_fixed_stake": {
+      "trades": 384,
+      "final_wallet": 2778.5868962267778,
+      "total_return": 1.778586896226778
+    },
+    "baseline_raw_market_prob_strategy": {
+      "trades": 0,
+      "note": "Same edge-threshold rule using raw market probability as model probability."
+    },
+    "prediction_quality_test": {
+      "calibrated": {
+        "mae": 0.44601125498814653,
+        "brier": 0.2270734783990555
+      },
+      "raw_market_prob": {
+        "mae": 0.4438321033210332,
+        "brier": 0.22666298985239852
+      }
+    }
+  }
+}
